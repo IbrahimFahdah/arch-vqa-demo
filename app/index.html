@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plan Reader</title>
+<style>
+  :root { --bg: #f6f6f4; --panel: #fff; --ink: #1d1d1b; --muted: #6b6b66; --line: #deddd8;
+          --accent: #c62828; --accent-ink: #fff; --ok: #2e7d32; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --panel: #1f1f1d; --ink: #ecebe6; --muted: #a09f99; --line: #34332f;
+            --accent: #ef5350; --accent-ink: #160f0f; --ok: #66bb6a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 14px 20px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: baseline; }
+  header h1 { font-size: 17px; margin: 0; }
+  header span { color: var(--muted); font-size: 13px; }
+  main { display: grid; grid-template-columns: 320px 1fr; gap: 16px; padding: 16px 20px; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; padding: 12px 16px; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .side { display: flex; flex-direction: column; gap: 14px; align-self: start; }
+  label { font-size: 13px; color: var(--muted); display: block; margin-bottom: 4px; }
+  select, textarea, input[type=file] { width: 100%; font: inherit; color: var(--ink); background: var(--bg);
+         border: 1px solid var(--line); border-radius: 7px; padding: 7px 8px; }
+  textarea { resize: vertical; min-height: 64px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+           border-radius: 7px; padding: 8px 12px; cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .5; cursor: wait; }
+  .result .big { font-size: 28px; font-weight: 700; }
+  .muted { color: var(--muted); font-size: 13px; }
+  pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; background: var(--bg);
+        border: 1px solid var(--line); border-radius: 7px; padding: 8px; max-height: 220px; overflow: auto; margin: 6px 0 0; }
+  .stage { position: relative; min-height: 300px; display: flex; align-items: center; justify-content: center; }
+  .stage .empty { color: var(--muted); text-align: center; padding: 60px 20px; }
+  canvas { max-width: 100%; height: auto; display: block; border-radius: 6px; }
+  .legend { display: flex; gap: 14px; align-items: center; font-size: 13px; color: var(--muted); margin-top: 8px; }
+  .sw { display: inline-block; width: 14px; height: 10px; border: 2px solid var(--accent); margin-right: 5px; vertical-align: middle; }
+  .err { color: var(--accent); }
+</style>
+</head>
+<body>
+<header><h1>Plan Reader</h1><span>runs on your machine · drawings never leave it</span></header>
+<main>
+  <div class="side">
+    <div class="panel">
+      <label for="example">Try an example</label>
+      <select id="example"><option value="">Choose an example plan…</option></select>
+      <div style="height:10px"></div>
+      <label for="file">Or upload your own floor plan (PNG or JPG)</label>
+      <input id="file" type="file" accept="image/*">
+      <div style="height:10px"></div>
+      <label for="model">Model</label>
+      <select id="model"></select>
+      <div class="muted" style="margin-top:6px">fpcvis = best door finder (needs <code>setup.sh --full</code>) · fpc = best for questions about text, finds doors with lower accuracy · base = untrained Qwen3-VL-4B, for comparison</div>
+    </div>
+    <div class="panel">
+      <div class="row">
+        <button class="primary" id="locate">Find doors</button>
+        <button id="count">How many doors?</button>
+      </div>
+      <div style="height:12px"></div>
+      <label for="q">Or ask anything about the plan</label>
+      <textarea id="q" placeholder="e.g. How many bedrooms are there?"></textarea>
+      <div style="height:8px"></div>
+      <button id="ask">Ask</button>
+    </div>
+    <div class="panel result" id="result"><span class="muted">Results appear here.</span></div>
+  </div>
+  <div class="panel">
+    <div class="stage" id="stage"><div class="empty">Choose an example or upload a floor plan to start.<br>
+      Finding doors takes about 10-30 seconds with a GPU, several minutes without.</div></div>
+    <div class="legend" id="legend" hidden><span><span class="sw"></span>door found by the model (numbered)</span>
+      <label style="margin:0"><input type="checkbox" id="shownum" checked> numbers</label></div>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let img = null, dataUrl = null, lastBoxes = [];
+
+let setupOf = {}, loaded = null;   // model -> server setup; models of another setup need a server restart
+fetch("/models").then(r => r.json()).then(d => {
+  setupOf = d.setup; loaded = d.loaded;
+  for (const m of d.models) { const o = document.createElement("option"); o.value = m; o.textContent = m; $("model").append(o); }
+  $("model").value = d.default;
+  for (const e of d.examples) { const o = document.createElement("option"); o.value = e; o.textContent = e.replace(/\.(png|jpg)$/i, ""); $("example").append(o); }
+});
+
+function loadImage(url) {
+  dataUrl = url; img = new Image();
+  img.onload = () => { lastBoxes = []; draw(); $("result").innerHTML = '<span class="muted">Plan loaded: ' +
+    img.naturalWidth + " x " + img.naturalHeight + " px.</span>"; };
+  img.src = dataUrl;
+}
+
+$("example").addEventListener("change", async e => {
+  if (!e.target.value) return;
+  $("file").value = "";
+  const blob = await (await fetch("/examples/" + e.target.value)).blob();
+  const rd = new FileReader(); rd.onload = () => loadImage(rd.result); rd.readAsDataURL(blob);
+});
+
+$("file").addEventListener("change", e => {
+  const f = e.target.files[0]; if (!f) return;
+  $("example").value = "";
+  const rd = new FileReader(); rd.onload = () => loadImage(rd.result); rd.readAsDataURL(f);
+});
+
+function draw() {
+  if (!img) return;
+  const c = document.createElement("canvas"); c.width = img.naturalWidth; c.height = img.naturalHeight;
+  const g = c.getContext("2d"); g.drawImage(img, 0, 0);
+  const W = c.width, H = c.height, lw = Math.max(3, Math.round(W / 350));
+  const red = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#c62828";
+  lastBoxes.forEach((b, i) => {
+    const x = b[0] * W / 1000, y = b[1] * H / 1000, w = (b[2] - b[0]) * W / 1000, h = (b[3] - b[1]) * H / 1000;
+    g.lineWidth = lw; g.strokeStyle = "#d32f2f"; g.strokeRect(x, y, w, h);
+    if ($("shownum").checked) {
+      const fs = Math.max(14, Math.round(W / 70)); g.font = `bold ${fs}px system-ui, sans-serif`;
+      const t = String(i + 1), tw = g.measureText(t).width + 8;
+      g.fillStyle = "#d32f2f"; g.fillRect(x, y - fs - 4 < 0 ? y : y - fs - 4, tw, fs + 4);
+      g.fillStyle = "#fff"; g.fillText(t, x + 4, (y - fs - 4 < 0 ? y : y - fs - 4) + fs);
+    }
+  });
+  $("stage").replaceChildren(c);
+  $("legend").hidden = lastBoxes.length === 0;
+}
+$("shownum").addEventListener("change", draw);
+
+async function run(mode) {
+  if (!dataUrl) { $("result").innerHTML = '<span class="err">Choose a floor plan image first.</span>'; return; }
+  const btns = document.querySelectorAll("button"); btns.forEach(b => b.disabled = true);
+  const model = $("model").value;
+  $("result").innerHTML = '<span class="muted">Asking ' + model + "…" +
+    (loaded && setupOf[model] !== loaded ? " (loading this model first, ~10-30 s)" : "") + "</span>";
+  try {
+    const r = await fetch("/ask", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: dataUrl, model, mode, question: $("q").value }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || r.status);
+    loaded = setupOf[model];
+    const retryNote = d.retried ? `<div class="muted">The first answer got stuck repeating boxes (${d.retried.first_boxes} listed); ` +
+      "asked again with a setting that avoids repeats.</div>" : "";
+    const esc = s => s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+    let head;
+    if (mode === "locate") {
+      lastBoxes = d.boxes; draw();
+      head = `<div class="big">${d.boxes.length} door${d.boxes.length === 1 ? "" : "s"} found</div>` +
+        (d.finish === "length" ? '<div class="err">Answer was cut off again (the model kept listing boxes); the count is unreliable.</div>' : "") +
+        retryNote;
+    } else {
+      lastBoxes = d.boxes.length ? d.boxes : []; draw();
+      head = `<div class="big" style="font-size:20px">${esc(d.answer.trim().slice(0, 200))}</div>` + retryNote;
+    }
+    $("result").innerHTML = head + `<div class="muted">${model} · ${d.seconds} s</div>` +
+      `<details><summary class="muted">question and raw answer</summary><pre>${esc(d.question)}\n\n→ ${esc(d.answer)}</pre></details>`;
+  } catch (e) {
+    $("result").innerHTML = '<span class="err">Error: ' + e.message + "</span><div class='muted'>Is the app still running? (bash run.sh)</div>";
+  } finally { btns.forEach(b => b.disabled = false); }
+}
+$("locate").onclick = () => run("locate");
+$("count").onclick = () => run("count");
+$("ask").onclick = () => run("ask");
+</script>
+</body>
+</html>

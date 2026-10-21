@@ -1,0 +1,7 @@
+# Downloaded by setup.sh
+models/
+third_party/
+# Written by the app
+logs/
+__pycache__/
+*.part
