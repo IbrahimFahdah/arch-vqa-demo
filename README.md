@@ -21,6 +21,9 @@ question and press **Ask**. Stop the app with Ctrl+C.
 
 On Windows, run the commands in **Git Bash** (comes with [Git for Windows](https://git-scm.com/download/win)).
 
+While this repository is private, the model downloads need the [GitHub CLI](https://cli.github.com/) logged in
+with an account that has access (`gh auth login`); `setup.sh` uses it automatically when a plain download fails.
+
 ## Requirements
 
 - Python 3.8 or newer (standard library only, nothing to `pip install`)
